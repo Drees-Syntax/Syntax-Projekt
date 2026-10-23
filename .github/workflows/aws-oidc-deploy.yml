@@ -23,8 +23,10 @@ jobs:
           role-to-assume: arn:aws:iam::863162198236:role/github-actions-deploy-test-2
           aws-region: eu-central-1
 
+      - name: Debug trust policy
+        run: |
+          aws iam get-role --role-name github-actions-deploy-test-2 \
+            --query 'Role.AssumeRolePolicyDocument'
+
       - name: Verify AWS identity
         run: aws sts get-caller-identity
-
-      - name: Show AWS account details
-        run: aws iam list-account-aliases || true
