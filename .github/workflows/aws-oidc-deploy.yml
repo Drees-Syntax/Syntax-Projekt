@@ -28,4 +28,4 @@ jobs:
 
       - name: Show AWS account details
         run: aws iam list-account-aliases || true
-#test
+        
