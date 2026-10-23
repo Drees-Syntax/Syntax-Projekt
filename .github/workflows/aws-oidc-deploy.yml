@@ -20,12 +20,12 @@ jobs:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::863162198236:role/github-actions-deploy-test-2
+          role-to-assume: arn:aws:iam::863162198236:role/github-actions-deploy-test-3
           aws-region: eu-central-1
 
       - name: Debug trust policy
         run: |
-          aws iam get-role --role-name github-actions-deploy-test-2 \
+          aws iam get-role --role-name github-actions-deploy-test-3 \
             --query 'Role.AssumeRolePolicyDocument'
 
       - name: Verify AWS identity
