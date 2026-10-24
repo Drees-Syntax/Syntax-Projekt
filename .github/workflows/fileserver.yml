@@ -74,30 +74,36 @@ jobs:
           $ip = "192.168.100.10"
 
           Invoke-Command -ComputerName $dc -Credential $credential -ScriptBlock {
-          param($dnsName, $zone, $ip)
+              param($dnsName, $zone, $ip)
 
-          try {
-          $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -ErrorAction Stop
-          if ($existing) {
-            Remove-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -RRType A -Force -ErrorAction SilentlyContinue
-          }
-          } catch {}
+              try {
+                  $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -ErrorAction Stop
+                  if ($existing) {
+                      Remove-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -RRType A -Force -ErrorAction SilentlyContinue
+                  }
+              } catch {}
 
-          Add-DnsServerResourceRecordA -ZoneName $zone -Name $dnsName -IPv4Address $ip
+              Add-DnsServerResourceRecordA -ZoneName $zone -Name $dnsName -IPv4Address $ip
           } -ArgumentList $dnsName, $domain, $ip
 
       - name: Copy repository contents to file share
         shell: powershell
         run: |
+          $domain = $env:DOMAIN_NAME
+          $domainUser = $env:DOMAIN_USER
+          $password = $env:DOMAIN_PASSWORD
+
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential("$domain\$domainUser", $securePassword)
+
           $server = $env:FILE_SERVER_NAME
           $share = "\\$server\Projekt"
-
-          if (-not (Test-Path $share)) {
-              throw "Freigabe nicht gefunden: $share"
-          }
 
           New-Item -ItemType Directory -Path "C:\temp\deploy" -Force | Out-Null
           Copy-Item -Path ".\*" -Destination "C:\temp\deploy\" -Recurse -Force
 
-          Copy-Item -Path "C:\temp\deploy\*" -Destination $share -Recurse -Force -ErrorAction Stop
+          New-PSDrive -Name "Z" -PSProvider FileSystem -Root $share -Credential $credential -Scope Global | Out-Null
+          Copy-Item -Path "C:\temp\deploy\*" -Destination "Z:\" -Recurse -Force -ErrorAction Stop
+          Remove-PSDrive -Name "Z" -Force
+
           Write-Host "Deployment auf $share abgeschlossen"
