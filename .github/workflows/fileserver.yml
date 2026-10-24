@@ -1,0 +1,102 @@
+name: Deploy File Server
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, windows, mgmt X64]
+
+    env:
+      AD_SERVER_NAME: Server2022Drees
+      FILE_SERVER_NAME: FileServerDrees
+      DOMAIN_NAME: ${{ secrets.DOMAIN_NAME }}
+      DOMAIN_USER: ${{ secrets.DOMAIN_USER }}
+      DOMAIN_PASSWORD: ${{ secrets.DOMAIN_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test remote access to AD and File Server
+        shell: powershell
+        run: |
+          $domain = $env:DOMAIN_NAME
+          $user = "$domain\$env:DOMAIN_USER"
+          $password = $env:DOMAIN_PASSWORD
+
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
+
+          Test-WSMan -ComputerName $env:AD_SERVER_NAME -Authentication Negotiate -Credential $credential
+          Test-WSMan -ComputerName $env:FILE_SERVER_NAME -Authentication Negotiate -Credential $credential
+
+      - name: Create share on File Server
+        shell: powershell
+        run: |
+          $domain = $env:DOMAIN_NAME
+          $user = "$domain\$env:DOMAIN_USER"
+          $password = $env:DOMAIN_PASSWORD
+
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
+
+          $server = $env:FILE_SERVER_NAME
+          $shareName = "Projekt"
+          $sharePath = "C:\Shares\Projekt"
+
+          Invoke-Command -ComputerName $server -Credential $credential -ScriptBlock {
+              param($shareName, $sharePath, $domain, $user)
+
+              New-Item -ItemType Directory -Path $sharePath -Force | Out-Null
+
+              if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
+                  New-SmbShare -Name $shareName -Path $sharePath -FullAccess "$domain\Administrators"
+              }
+
+              icacls $sharePath /grant "$user:(OI)(CI)(RX)" /T /C /Q | Out-Null
+              icacls $sharePath /grant "$domain\Administrators:(OI)(CI)(F)" /T /C /Q | Out-Null
+          } -ArgumentList $shareName, $sharePath, $domain, $user
+
+      - name: Create DNS A record
+        shell: powershell
+        run: |
+          $domain = $env:DOMAIN_NAME
+          $user = "$domain\$env:DOMAIN_USER"
+          $password = $env:DOMAIN_PASSWORD
+
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
+
+          $dc = $env:AD_SERVER_NAME
+          $dnsName = "fileshare"
+          $ip = "10.0.0.20"
+
+          Invoke-Command -ComputerName $dc -Credential $credential -ScriptBlock {
+              param($dnsName, $zone, $ip)
+
+              try {
+                  $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -ErrorAction Stop
+                  if ($existing) {
+                      Remove-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -RRType A -Force -ErrorAction SilentlyContinue
+                  }
+              } catch {}
+
+              Add-DnsServerResourceRecordA -ZoneName $zone -Name $dnsName -IPv4Address $ip -CreatePtr
+          } -ArgumentList $dnsName, $domain, $ip
+
+      - name: Copy repository contents to file share
+        shell: powershell
+        run: |
+          $server = $env:FILE_SERVER_NAME
+          $share = "\\$server\Projekt"
+
+          if (-not (Test-Path $share)) {
+              throw "Freigabe nicht gefunden: $share"
+          }
+
+          New-Item -ItemType Directory -Path "C:\temp\deploy" -Force | Out-Null
+          Copy-Item -Path ".\*" -Destination "C:\temp\deploy\" -Recurse -Force
+
+          Copy-Item -Path "C:\temp\deploy\*" -Destination $share -Recurse -Force -ErrorAction Stop
+          Write-Host "Deployment auf $share abgeschlossen"
