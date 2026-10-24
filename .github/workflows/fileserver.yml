@@ -5,7 +5,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, windows, mgmt X64]
+    runs-on: [self-hosted, windows, mgmt, X64]
 
     env:
       AD_SERVER_NAME: Server2022Drees
