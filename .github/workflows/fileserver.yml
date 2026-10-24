@@ -18,7 +18,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Test remote access to AD and File Server
+      - name: Test remote access
         shell: powershell
         run: |
           $domain = $env:DOMAIN_NAME
