@@ -71,19 +71,19 @@ jobs:
 
           $dc = $env:AD_SERVER_NAME
           $dnsName = "fileshare"
-          $ip = "10.0.0.20"
+          $ip = "192.168.100.10"
 
           Invoke-Command -ComputerName $dc -Credential $credential -ScriptBlock {
-              param($dnsName, $zone, $ip)
+          param($dnsName, $zone, $ip)
 
-              try {
-                  $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -ErrorAction Stop
-                  if ($existing) {
-                      Remove-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -RRType A -Force -ErrorAction SilentlyContinue
-                  }
-              } catch {}
+          try {
+          $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -ErrorAction Stop
+          if ($existing) {
+            Remove-DnsServerResourceRecord -ZoneName $zone -Name $dnsName -RRType A -Force -ErrorAction SilentlyContinue
+          }
+          } catch {}
 
-              Add-DnsServerResourceRecordA -ZoneName $zone -Name $dnsName -IPv4Address $ip -CreatePtr
+          Add-DnsServerResourceRecordA -ZoneName $zone -Name $dnsName -IPv4Address $ip
           } -ArgumentList $dnsName, $domain, $ip
 
       - name: Copy repository contents to file share
