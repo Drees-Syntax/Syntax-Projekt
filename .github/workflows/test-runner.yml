@@ -1,1 +1,16 @@
+name: Runner Test
 
+on:
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: [self-hosted, windows, mgmt]
+
+    steps:
+      - name: Show environment
+        shell: powershell
+        run: |
+          hostname
+          whoami
+          Get-ChildItem Env:
