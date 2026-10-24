@@ -54,7 +54,7 @@ jobs:
                   New-SmbShare -Name $shareName -Path $sharePath -FullAccess "$domain\Administrators"
               }
 
-              icacls $sharePath /grant "$domainUser:(OI)(CI)(RX)" /T /C /Q | Out-Null
+              icacls $sharePath /grant "{$domainUser}:(OI)(CI)(RX)" /T /C /Q | Out-Null
               icacls $sharePath /grant "$domain\Administrators:(OI)(CI)(F)" /T /C /Q | Out-Null
           } -ArgumentList $shareName, $sharePath, $domain, $domainUser
 
