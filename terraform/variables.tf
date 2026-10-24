@@ -1,9 +1,11 @@
 variable "aws_region" {
-  type    = string
-  default = "eu-central-1"
+  description = "AWS region"
+  type        = string
+  default     = "eu-central-1"
 }
 
 variable "project_name" {
-  type    = string
-  default = "projekt"
+  description = "Name prefix for AWS resources"
+  type        = string
+  default     = "projektdrees"
 }
