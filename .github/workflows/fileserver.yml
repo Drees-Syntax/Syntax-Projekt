@@ -5,7 +5,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, windows, mgmt, X64]
+    runs-on: [self-hosted, windows, mgmt]
 
     env:
       AD_SERVER_NAME: Server2022Drees
@@ -22,11 +22,11 @@ jobs:
         shell: powershell
         run: |
           $domain = $env:DOMAIN_NAME
-          $user = "$domain\$env:DOMAIN_USER"
+          $domainUser = $env:DOMAIN_USER
           $password = $env:DOMAIN_PASSWORD
 
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
+          $credential = New-Object System.Management.Automation.PSCredential("$domain\$domainUser", $securePassword)
 
           Test-WSMan -ComputerName $env:AD_SERVER_NAME -Authentication Negotiate -Credential $credential
           Test-WSMan -ComputerName $env:FILE_SERVER_NAME -Authentication Negotiate -Credential $credential
@@ -35,18 +35,18 @@ jobs:
         shell: powershell
         run: |
           $domain = $env:DOMAIN_NAME
-          $user = "$domain\$env:DOMAIN_USER"
+          $domainUser = $env:DOMAIN_USER
           $password = $env:DOMAIN_PASSWORD
 
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
+          $credential = New-Object System.Management.Automation.PSCredential("$domain\$domainUser", $securePassword)
 
           $server = $env:FILE_SERVER_NAME
           $shareName = "Projekt"
           $sharePath = "C:\Shares\Projekt"
 
           Invoke-Command -ComputerName $server -Credential $credential -ScriptBlock {
-              param($shareName, $sharePath, $domain, $user)
+              param($shareName, $sharePath, $domain, $domainUser)
 
               New-Item -ItemType Directory -Path $sharePath -Force | Out-Null
 
@@ -54,19 +54,19 @@ jobs:
                   New-SmbShare -Name $shareName -Path $sharePath -FullAccess "$domain\Administrators"
               }
 
-              icacls $sharePath /grant "$user:(OI)(CI)(RX)" /T /C /Q | Out-Null
+              icacls $sharePath /grant "$domainUser:(OI)(CI)(RX)" /T /C /Q | Out-Null
               icacls $sharePath /grant "$domain\Administrators:(OI)(CI)(F)" /T /C /Q | Out-Null
-          } -ArgumentList $shareName, $sharePath, $domain, $user
+          } -ArgumentList $shareName, $sharePath, $domain, $domainUser
 
       - name: Create DNS A record
         shell: powershell
         run: |
           $domain = $env:DOMAIN_NAME
-          $user = "$domain\$env:DOMAIN_USER"
+          $domainUser = $env:DOMAIN_USER
           $password = $env:DOMAIN_PASSWORD
 
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential($user, $securePassword)
+          $credential = New-Object System.Management.Automation.PSCredential("$domain\$domainUser", $securePassword)
 
           $dc = $env:AD_SERVER_NAME
           $dnsName = "fileshare"
