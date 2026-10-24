@@ -1,10 +1,7 @@
 name: AWS OIDC deployment
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
+  workflow_dispatch: # Aktiviert den manuellen Start-Button auf GitHub
 
 permissions:
   id-token: write
