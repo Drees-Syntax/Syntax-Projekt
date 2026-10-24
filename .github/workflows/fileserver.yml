@@ -18,7 +18,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Test remote access
+      - name: Test remote access to AD and File Server
         shell: powershell
         run: |
           $domain = $env:DOMAIN_NAME
@@ -50,12 +50,12 @@ jobs:
 
               New-Item -ItemType Directory -Path $sharePath -Force | Out-Null
 
-              if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
-                  New-SmbShare -Name $shareName -Path $sharePath -FullAccess "$domain\Administrators"
+              if (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue) {
+                  Remove-SmbShare -Name $shareName -Force -ErrorAction SilentlyContinue
               }
 
-              icacls $sharePath /grant "{$domainUser}:(OI)(CI)(RX)" /T /C /Q | Out-Null
-              icacls $sharePath /grant "$domain\Administrators:(OI)(CI)(F)" /T /C /Q | Out-Null
+              New-SmbShare -Name $shareName -Path $sharePath -FullAccess $domainUser
+              icacls $sharePath /grant "$domainUser:(OI)(CI)(RX)" /T /C /Q | Out-Null
           } -ArgumentList $shareName, $sharePath, $domain, $domainUser
 
       - name: Create DNS A record
