@@ -44,9 +44,10 @@ jobs:
           $server = $env:FILE_SERVER_NAME
           $shareName = "Projekt"
           $sharePath = "C:\Shares\Projekt"
+          $principal = "$domain\$domainUser"
 
           Invoke-Command -ComputerName $server -Credential $credential -ScriptBlock {
-              param($shareName, $sharePath, $domain, $domainUser)
+              param($shareName, $sharePath, $principal)
 
               New-Item -ItemType Directory -Path $sharePath -Force | Out-Null
 
@@ -54,9 +55,9 @@ jobs:
                   Remove-SmbShare -Name $shareName -Force -ErrorAction SilentlyContinue
               }
 
-              New-SmbShare -Name $shareName -Path $sharePath -FullAccess $domainUser
-              icacls $sharePath /grant "$domainUser:(OI)(CI)(RX)" /T /C /Q | Out-Null
-          } -ArgumentList $shareName, $sharePath, $domain, $domainUser
+              New-SmbShare -Name $shareName -Path $sharePath -FullAccess $principal
+              icacls $sharePath /grant "${principal}:(OI)(CI)(RX)" /T /C /Q | Out-Null
+          } -ArgumentList $shareName, $sharePath, $principal
 
       - name: Create DNS A record
         shell: powershell
