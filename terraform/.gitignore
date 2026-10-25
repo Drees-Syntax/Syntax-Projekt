@@ -2,3 +2,5 @@ terraform.tfvars
 *.tfvars
 *.tfvars.json
 tfplan
+.github_oidc.ps1
+.github_oidc.sh
