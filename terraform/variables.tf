@@ -13,6 +13,7 @@ variable "project_name" {
 variable "ssh_public_key" {
   description = "Public key used for the EC2 key pair"
   type        = string
+  default     = null
 }
 
 variable "ad_domain" {
