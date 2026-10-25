@@ -15,10 +15,9 @@ jobs:
         working-directory: terraform
 
     env:
-      TF_VAR_domain_admin_password: ${{ secrets.DOMAIN_ADMIN_PASSWORD }}
-      TF_VAR_safe_mode_password: ${{ secrets.SAFE_MODE_PASSWORD }}
-      # Nur falls in variables.tf noch benötigt:
-      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+       TF_VAR_domain_admin_password: ${{ secrets.DOMAIN_ADMIN_PASSWORD }}
+       TF_VAR_safe_mode_password: ${{ secrets.AD_SAFE_MODE_PASSWORD }}
+       TF_VAR_ssh_public_key: ${{ secrets.AWS_SSH_PUBLIC_KEY }}
 
     steps:
       - name: Checkout
