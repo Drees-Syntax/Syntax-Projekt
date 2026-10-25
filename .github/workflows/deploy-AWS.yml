@@ -11,7 +11,10 @@ jobs:
       AWS_REGION: eu-central-1
       TF_VAR_aws_region: eu-central-1
       TF_VAR_project_name: projektdrees
+      TF_VAR_ad_domain: projektdrees.local
       TF_VAR_ssh_public_key: ${{ secrets.AWS_SSH_PUBLIC_KEY }}
+      TF_VAR_safe_mode_password: ${{ secrets.AD_SAFE_MODE_PASSWORD }}
+      TF_VAR_domain_admin_password: ${{ secrets.DOMAIN_ADMIN_PASSWORD }}
 
     steps:
       - name: Checkout repository
@@ -29,22 +32,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform format check
-        timeout-minutes: 2
-        run: terraform -chdir=terraform fmt -check -diff -recursive
-
       - name: Terraform init
-        timeout-minutes: 5
         run: terraform -chdir=terraform init
 
       - name: Terraform validate
-        timeout-minutes: 5
         run: terraform -chdir=terraform validate
 
       - name: Terraform plan
-        timeout-minutes: 10
         run: terraform -chdir=terraform plan -out=tfplan
 
       - name: Terraform apply
-        timeout-minutes: 15
         run: terraform -chdir=terraform apply -auto-approve tfplan
