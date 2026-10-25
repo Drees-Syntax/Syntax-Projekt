@@ -1,0 +1,88 @@
+name: AD Migration (Export/Import)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "export oder import"
+        required: true
+        default: "export"
+        type: choice
+        options:
+          - export
+          - import
+      source_domain_dn:
+        description: "z.B. DC=ProjektDrees,DC=local"
+        required: true
+        default: "DC=ProjektDrees,DC=local"
+      target_domain_dn:
+        description: "z.B. DC=PROJEKTDREES,DC=local"
+        required: true
+        default: "DC=PROJEKTDREES,DC=local"
+      base_ou_name:
+        description: "z.B. Projektdaten"
+        required: true
+        default: "Projektdaten"
+
+jobs:
+  run:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare export dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+
+      # EXPORT: gegen VirtualBox AD (Server2022Drees)
+      - name: Export AD objects from source
+        if: ${{ github.event.inputs.mode == 'export' }}
+        shell: pwsh
+        env:
+          SRC_AD_HOST: ${{ secrets.SRC_AD_HOST }}
+          SRC_AD_USER: ${{ secrets.SRC_AD_USER }}
+          SRC_AD_PASSWORD: ${{ secrets.SRC_AD_PASSWORD }}
+        run: |
+          $sec = ConvertTo-SecureString $env:SRC_AD_PASSWORD -AsPlainText -Force
+          $cred = New-Object pscredential($env:SRC_AD_USER, $sec)
+
+          Invoke-Command -ComputerName $env:SRC_AD_HOST -Credential $cred -ScriptBlock {
+            param($repoPath,$sourceDomainDn,$baseOuName)
+            Set-Location $repoPath
+            .\scripts\ad-export.ps1 -SourceDomainDN $sourceDomainDn -BaseOuName $baseOuName -OutDir ".\artifacts"
+          } -ArgumentList "${{ github.workspace }}","${{ github.event.inputs.source_domain_dn }}","${{ github.event.inputs.base_ou_name }}"
+
+      - name: Upload export artifacts
+        if: ${{ github.event.inputs.mode == 'export' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ad-export
+          path: artifacts/*.csv
+
+      # IMPORT: nach AWS AD (AD01)
+      - name: Download export artifacts
+        if: ${{ github.event.inputs.mode == 'import' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ad-export
+          path: artifacts
+
+      - name: Import AD objects to target
+        if: ${{ github.event.inputs.mode == 'import' }}
+        shell: pwsh
+        env:
+          DST_AD_HOST: ${{ secrets.DST_AD_HOST }}
+          DST_AD_USER: ${{ secrets.DST_AD_USER }}
+          DST_AD_PASSWORD: ${{ secrets.DST_AD_PASSWORD }}
+          DEFAULT_USER_PASSWORD: ${{ secrets.DEFAULT_USER_PASSWORD }}
+        run: |
+          $sec = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
+          $cred = New-Object pscredential($env:DST_AD_USER, $sec)
+
+          Invoke-Command -ComputerName $env:DST_AD_HOST -Credential $cred -ScriptBlock {
+            param($repoPath,$targetDomainDn,$baseOuName,$defaultPw)
+            Set-Location $repoPath
+            .\scripts\ad-import.ps1 -TargetDomainDN $targetDomainDn -BaseOuName $baseOuName -InDir ".\artifacts" -DefaultUserPassword $defaultPw
+          } -ArgumentList "${{ github.workspace }}","${{ github.event.inputs.target_domain_dn }}","${{ github.event.inputs.base_ou_name }}",$env:DEFAULT_USER_PASSWORD
