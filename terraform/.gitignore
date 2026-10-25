@@ -1,6 +1,22 @@
+﻿# Local Terraform state
+*.tfstate
+*.tfstate.*
+
+# Terraform working directory
+.terraform/
+
+# Local variable files
 terraform.tfvars
 *.tfvars
 *.tfvars.json
+
+# Saved plan files
 tfplan
+*.tfplan
+
+# Local terraform binary
+terraform_*
+
+# Local helper scripts
 .github_oidc.ps1
 .github_oidc.sh
