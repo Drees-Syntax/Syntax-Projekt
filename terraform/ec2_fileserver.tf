@@ -17,7 +17,9 @@ resource "aws_instance" "fileserver" {
       Start-Sleep -Seconds 30
   }
 
-  Install-WindowsFeature FS-FileServer -IncludeManagementTools -ErrorAction Stop
+  Install-WindowsFeature FS-FileServer,Remote-Desktop-Services -IncludeManagementTools -ErrorAction Stop
+  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+  Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
   $securePassword = ConvertTo-SecureString $domainPassword -AsPlainText -Force
   $credential = New-Object System.Management.Automation.PSCredential ("$domainName\$domainUser", $securePassword)
