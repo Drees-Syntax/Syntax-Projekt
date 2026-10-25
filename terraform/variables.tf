@@ -32,3 +32,9 @@ variable "domain_admin_password" {
   type        = string
   sensitive   = true
 }
+
+variable "key_name_suffix" {
+  description = "Unique suffix for the EC2 key pair name to avoid duplicates on reruns"
+  type        = string
+  default     = "default"
+}
