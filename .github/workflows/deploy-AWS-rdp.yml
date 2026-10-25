@@ -1,0 +1,46 @@
+name: Deploy AWS AD + Fileserver (RDP enabled)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: eu-central-1
+      TF_VAR_aws_region: eu-central-1
+      TF_VAR_project_name: projektdrees
+      TF_VAR_ad_domain: projektdrees.local
+      TF_VAR_ssh_public_key: ${{ secrets.AWS_SSH_PUBLIC_KEY }}
+      TF_VAR_safe_mode_password: ${{ secrets.AD_SAFE_MODE_PASSWORD }}
+      TF_VAR_domain_admin_password: ${{ secrets.DOMAIN_ADMIN_PASSWORD }}
+      TF_VAR_key_name_suffix: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform -chdir=terraform init
+
+      - name: Terraform validate
+        run: terraform -chdir=terraform validate
+
+      - name: Terraform plan
+        run: terraform -chdir=terraform plan -out=tfplan
+
+      - name: Terraform apply
+        run: terraform -chdir=terraform apply -auto-approve tfplan
