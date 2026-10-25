@@ -3,7 +3,7 @@ resource "aws_instance" "ad" {
   instance_type          = "t3.medium"
   subnet_id              = aws_subnet.main.id
   vpc_security_group_ids = [aws_security_group.windows.id]
-  key_name               = "your-keypair"
+  key_name               = aws_key_pair.deployer.key_name
 
   tags = {
     Name = "${var.project_name}-ad"
