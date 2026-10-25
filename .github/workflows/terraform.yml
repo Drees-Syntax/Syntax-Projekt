@@ -45,6 +45,6 @@ jobs:
       - name: Terraform Plan
         run: terraform plan -out=tfplan
 
-      - name: Terraform Apply (manual only on main)
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+      - name: Terraform Apply (disabled)
+        if: false
         run: terraform apply -auto-approve tfplan
