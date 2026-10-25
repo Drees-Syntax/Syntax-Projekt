@@ -36,4 +36,8 @@ resource "aws_instance" "ad" {
   tags = {
     Name = "${var.project_name}-ad"
   }
+
+  lifecycle {
+    ignore_changes = [user_data]
+  }
 }
