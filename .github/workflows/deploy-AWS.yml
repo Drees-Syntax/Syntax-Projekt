@@ -15,6 +15,7 @@ jobs:
       TF_VAR_ssh_public_key: ${{ secrets.AWS_SSH_PUBLIC_KEY }}
       TF_VAR_safe_mode_password: ${{ secrets.AD_SAFE_MODE_PASSWORD }}
       TF_VAR_domain_admin_password: ${{ secrets.DOMAIN_ADMIN_PASSWORD }}
+      TF_VAR_key_name_suffix: ${{ github.run_id }}
 
     steps:
       - name: Checkout repository
@@ -33,13 +34,17 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform init
+        timeout-minutes: 5
         run: terraform -chdir=terraform init
 
       - name: Terraform validate
+        timeout-minutes: 5
         run: terraform -chdir=terraform validate
 
       - name: Terraform plan
+        timeout-minutes: 10
         run: terraform -chdir=terraform plan -out=tfplan
 
       - name: Terraform apply
+        timeout-minutes: 15
         run: terraform -chdir=terraform apply -auto-approve tfplan
