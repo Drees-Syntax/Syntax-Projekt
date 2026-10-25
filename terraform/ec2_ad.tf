@@ -4,7 +4,7 @@ resource "aws_instance" "ad" {
   subnet_id                   = aws_subnet.main.id
   associate_public_ip_address = true
   vpc_security_group_ids      = [aws_security_group.windows.id]
-  key_name                    = aws_key_pair.deployer.key_name
+  key_name                    = var.existing_key_name
 
   user_data = <<-EOF
   <powershell>
