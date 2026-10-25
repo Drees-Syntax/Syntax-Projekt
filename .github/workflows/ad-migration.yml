@@ -30,7 +30,7 @@ on:
 
 jobs:
   run:
-    runs-on: self-hosted
+    runs-on: [self-hosted, windows, x64, MGMT01]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
