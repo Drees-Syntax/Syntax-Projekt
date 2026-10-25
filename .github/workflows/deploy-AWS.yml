@@ -7,10 +7,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: terraform
-
     env:
       AWS_REGION: eu-central-1
       TF_VAR_aws_region: eu-central-1
@@ -32,17 +28,27 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Debug Terraform directory
+        timeout-minutes: 2
+        run: |
+          pwd
+          ls -la
+          ls -la terraform
+          terraform version
+          find terraform -maxdepth 2 -type f | sort
+
       - name: Terraform Format Check
-        run: terraform fmt -check -diff
+        timeout-minutes: 2
+        run: terraform -chdir=terraform fmt -check -diff -recursive
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform -chdir=terraform init
 
       - name: Terraform Validate
-        run: terraform validate
+        run: terraform -chdir=terraform validate
 
       - name: Terraform Plan
-        run: terraform plan -out=tfplan
+        run: terraform -chdir=terraform plan -out=tfplan
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: terraform -chdir=terraform apply -auto-approve tfplan
