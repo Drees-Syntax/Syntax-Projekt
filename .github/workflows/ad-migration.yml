@@ -11,6 +11,10 @@ on:
         options:
           - export
           - import
+      export_run_id:
+        description: "Nur für import: Run-ID des vorherigen Export-Runs"
+        required: false
+        default: ""
       source_domain_dn:
         description: "z.B. DC=ProjektDrees,DC=local"
         required: true
@@ -31,12 +35,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare export dir
+      - name: Prepare local artifact dir
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
 
-      # EXPORT: gegen VirtualBox AD (Server2022Drees)
+      # -------------------------
+      # EXPORT
+      # -------------------------
       - name: Export AD objects from source
         if: ${{ github.event.inputs.mode == 'export' }}
         shell: pwsh
@@ -45,14 +51,34 @@ jobs:
           SRC_AD_USER: ${{ secrets.SRC_AD_USER }}
           SRC_AD_PASSWORD: ${{ secrets.SRC_AD_PASSWORD }}
         run: |
-          $sec = ConvertTo-SecureString $env:SRC_AD_PASSWORD -AsPlainText -Force
+          $ErrorActionPreference = "Stop"
+
+          $sec  = ConvertTo-SecureString $env:SRC_AD_PASSWORD -AsPlainText -Force
           $cred = New-Object pscredential($env:SRC_AD_USER, $sec)
 
-          Invoke-Command -ComputerName $env:SRC_AD_HOST -Credential $cred -ScriptBlock {
-            param($repoPath,$sourceDomainDn,$baseOuName)
-            Set-Location $repoPath
-            .\scripts\ad-export.ps1 -SourceDomainDN $sourceDomainDn -BaseOuName $baseOuName -OutDir ".\artifacts"
-          } -ArgumentList "${{ github.workspace }}","${{ github.event.inputs.source_domain_dn }}","${{ github.event.inputs.base_ou_name }}"
+          $session = New-PSSession -ComputerName $env:SRC_AD_HOST -Credential $cred
+          try {
+            $remoteRoot = "C:\Temp\ad-migration"
+            $remoteOut  = "$remoteRoot\out"
+
+            Invoke-Command -Session $session -ScriptBlock {
+              param($rRoot, $rOut)
+              New-Item -ItemType Directory -Force -Path $rRoot | Out-Null
+              New-Item -ItemType Directory -Force -Path $rOut  | Out-Null
+            } -ArgumentList $remoteRoot, $remoteOut
+
+            Copy-Item -ToSession $session -Path ".\scripts\ad-export.ps1" -Destination "$remoteRoot\ad-export.ps1" -Force
+
+            Invoke-Command -Session $session -ScriptBlock {
+              param($rRoot, $srcDn, $ouName, $rOut)
+              & "$rRoot\ad-export.ps1" -SourceDomainDN $srcDn -BaseOuName $ouName -OutDir $rOut
+            } -ArgumentList $remoteRoot, "${{ github.event.inputs.source_domain_dn }}", "${{ github.event.inputs.base_ou_name }}", $remoteOut
+
+            Copy-Item -FromSession $session -Path "$remoteOut\*.csv" -Destination ".\artifacts\" -Force
+          }
+          finally {
+            if ($session) { Remove-PSSession $session }
+          }
 
       - name: Upload export artifacts
         if: ${{ github.event.inputs.mode == 'export' }}
@@ -60,13 +86,27 @@ jobs:
         with:
           name: ad-export
           path: artifacts/*.csv
+          if-no-files-found: error
+          retention-days: 7
 
-      # IMPORT: nach AWS AD (AD01)
-      - name: Download export artifacts
+      # -------------------------
+      # IMPORT
+      # -------------------------
+      - name: Validate import input
+        if: ${{ github.event.inputs.mode == 'import' }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace("${{ github.event.inputs.export_run_id }}")) {
+            throw "Für mode=import muss export_run_id gesetzt sein."
+          }
+
+      - name: Download export artifacts from selected run
         if: ${{ github.event.inputs.mode == 'import' }}
         uses: actions/download-artifact@v4
         with:
           name: ad-export
+          run-id: ${{ github.event.inputs.export_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: artifacts
 
       - name: Import AD objects to target
@@ -78,11 +118,31 @@ jobs:
           DST_AD_PASSWORD: ${{ secrets.DST_AD_PASSWORD }}
           DEFAULT_USER_PASSWORD: ${{ secrets.DEFAULT_USER_PASSWORD }}
         run: |
-          $sec = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
-          $cred = New-Object pscredential($env:DST_AD_USER, $sec)
+          $ErrorActionPreference = "Stop"
 
-          Invoke-Command -ComputerName $env:DST_AD_HOST -Credential $cred -ScriptBlock {
-            param($repoPath,$targetDomainDn,$baseOuName,$defaultPw)
-            Set-Location $repoPath
-            .\scripts\ad-import.ps1 -TargetDomainDN $targetDomainDn -BaseOuName $baseOuName -InDir ".\artifacts" -DefaultUserPassword $defaultPw
-          } -ArgumentList "${{ github.workspace }}","${{ github.event.inputs.target_domain_dn }}","${{ github.event.inputs.base_ou_name }}",$env:DEFAULT_USER_PASSWORD
+          $sec  = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
+          $cred = New-Object pscredential($env:DST_AD_USER, $sec)
+          $defaultPw = $env:DEFAULT_USER_PASSWORD
+
+          $session = New-PSSession -ComputerName $env:DST_AD_HOST -Credential $cred
+          try {
+            $remoteRoot = "C:\Temp\ad-migration"
+            $remoteIn   = "$remoteRoot\in"
+
+            Invoke-Command -Session $session -ScriptBlock {
+              param($rRoot, $rIn)
+              New-Item -ItemType Directory -Force -Path $rRoot | Out-Null
+              New-Item -ItemType Directory -Force -Path $rIn   | Out-Null
+            } -ArgumentList $remoteRoot, $remoteIn
+
+            Copy-Item -ToSession $session -Path ".\scripts\ad-import.ps1" -Destination "$remoteRoot\ad-import.ps1" -Force
+            Copy-Item -ToSession $session -Path ".\artifacts\*.csv"       -Destination "$remoteIn\" -Force
+
+            Invoke-Command -Session $session -ScriptBlock {
+              param($rRoot, $tgtDn, $ouName, $rIn, $pw)
+              & "$rRoot\ad-import.ps1" -TargetDomainDN $tgtDn -BaseOuName $ouName -InDir $rIn -DefaultUserPassword $pw
+            } -ArgumentList $remoteRoot, "${{ github.event.inputs.target_domain_dn }}", "${{ github.event.inputs.base_ou_name }}", $remoteIn, $defaultPw
+          }
+          finally {
+            if ($session) { Remove-PSSession $session }
+          }
