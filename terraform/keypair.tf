@@ -1,4 +1,8 @@
+variable "ssh_public_key" {
+  type = string
+}
+
 resource "aws_key_pair" "deployer" {
-  key_name   = "projekt-key"
-  public_key = file("~/.ssh/id_rsa.pub")
+  key_name   = "${var.project_name}-key"
+  public_key = var.ssh_public_key
 }
