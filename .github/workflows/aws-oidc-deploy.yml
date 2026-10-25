@@ -1,29 +1,49 @@
-name: AWS OIDC deployment
+name: Deploy AWS AD + Fileserver
 
 on:
-  workflow_dispatch: # Aktiviert den manuellen Start-Button auf GitHub
-
-permissions:
-  id-token: write
-  contents: read
+  workflow_dispatch:
 
 jobs:
-  aws-auth-check:
+  deploy:
     runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: eu-central-1
+      TF_VAR_aws_region: eu-central-1
+      TF_VAR_project_name: projektdrees
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials via OIDC
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::863162198236:role/github-actions-deploy-test-3
-          aws-region: eu-central-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Debug trust policy
-        run: |
-          aws iam get-role --role-name github-actions-deploy-test-3 \
-            --query 'Role.AssumeRolePolicyDocument'
+      - name: Terraform format check
+        timeout-minutes: 2
+        run: terraform -chdir=terraform fmt -check -diff -recursive
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
+      - name: Terraform init
+        timeout-minutes: 5
+        run: terraform -chdir=terraform init
+
+      - name: Terraform validate
+        timeout-minutes: 5
+        run: terraform -chdir=terraform validate
+
+      - name: Terraform plan
+        timeout-minutes: 10
+        run: terraform -chdir=terraform plan -out=tfplan
+
+      - name: Terraform apply
+        timeout-minutes: 15
+        run: terraform -chdir=terraform apply -auto-approve tfplan
