@@ -32,4 +32,8 @@ resource "aws_instance" "fileserver" {
   tags = {
     Name = "${var.project_name}-fileserver"
   }
+
+  lifecycle {
+    ignore_changes = [user_data]
+  }
 }
