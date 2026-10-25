@@ -1,4 +1,4 @@
-﻿terraform {
+terraform {
   backend "s3" {
     bucket         = "projektdrees-tfstate-4213"
     key            = "syntax-projekt/prod/terraform.tfstate"
