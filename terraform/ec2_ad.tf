@@ -15,6 +15,10 @@ resource "aws_instance" "ad" {
   Rename-Computer -NewName "AD01" -Force
 
   Install-WindowsFeature AD-Domain-Services,DNS -IncludeManagementTools -ErrorAction Stop
+  Install-WindowsFeature Remote-Desktop-Services -IncludeManagementTools -ErrorAction Stop
+
+  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+  Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
   $securePassword = ConvertTo-SecureString $safeModePassword -AsPlainText -Force
 
