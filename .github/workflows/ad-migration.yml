@@ -57,19 +57,9 @@ jobs:
             throw "SRC_AD_USER must be DOMAIN\user or user@domain.tld"
           }
 
-          try {
-            Resolve-DnsName -Name $hostName -ErrorAction Stop | Out-Null
-            Write-Host "DNS resolution OK"
-          } catch {
-            throw "DNS failed for '$hostName'. Prefer FQDN. Error: $($_.Exception.Message)"
-          }
-
-          try {
-            Test-WSMan -ComputerName $hostName -ErrorAction Stop | Out-Null
-            Write-Host "WinRM reachable"
-          } catch {
-            throw "Test-WSMan failed for '$hostName'. Error: $($_.Exception.Message)"
-          }
+          Resolve-DnsName -Name $hostName -ErrorAction Stop | Out-Null
+          Test-WSMan -ComputerName $hostName -ErrorAction Stop | Out-Null
+          Write-Host "Source DNS + WinRM OK"
 
       - name: Export AD objects from source
         run: |
@@ -94,7 +84,6 @@ jobs:
             $exportData = Invoke-Command -Session $session -ScriptBlock {
               Import-Module ActiveDirectory -ErrorAction Stop
 
-              # Beispiel: Users + Groups exportieren (anpassbar)
               $users = Get-ADUser -Filter * -Properties SamAccountName,UserPrincipalName,Enabled,DisplayName,GivenName,Surname,Mail,DistinguishedName |
                 Select-Object SamAccountName,UserPrincipalName,Enabled,DisplayName,GivenName,Surname,Mail,DistinguishedName
 
@@ -184,11 +173,16 @@ jobs:
           }
 
           Resolve-DnsName -Name $hostName -ErrorAction Stop | Out-Null
-          Test-WSMan -ComputerName $hostName -ErrorAction Stop | Out-Null
-          Write-Host "Target DNS + WinRM OK"
+          Write-Host "DNS OK"
 
-             - name: Import AD objects to target (dry-run log)
-            run: |
+          $tcp = Test-NetConnection -ComputerName $hostName -Port 5985 -WarningAction SilentlyContinue
+          if (-not $tcp.TcpTestSucceeded) {
+            throw "Port 5985 not reachable on $hostName"
+          }
+          Write-Host "WinRM port 5985 OK"
+
+      - name: Import AD objects to target (dry-run log)
+        run: |
           $ErrorActionPreference = "Stop"
 
           $file = "artifacts\ad-export.json"
@@ -196,19 +190,13 @@ jobs:
 
           $hostName = $env:DST_AD_HOST.Trim()
           $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
-          $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER, $secure)
+          $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER.Trim(), $secure)
 
           $session = $null
           try {
-            try {
-              # AWS/externes Ziel: Negotiate ist der stabile Pfad
-              $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
-              Write-Host "Connected via Negotiate"
-            } catch {
-              throw "WinRM session failed (Negotiate) to '$hostName' with user '$($env:DST_AD_USER)'. Error: $($_.Exception.Message)"
-            }
+            $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
+            Write-Host "Connected via Negotiate"
 
-            # Sicherer Start: nur Zusammenfassung protokollieren
             $summary = [PSCustomObject]@{
               ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
               TargetHost    = $hostName
@@ -220,27 +208,6 @@ jobs:
 
             $summary | ConvertTo-Json -Depth 5 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
             Write-Host "Dry-run summary created: artifacts\import-summary.json"
-
-            # HIER später echte Create/Update-Logik ergänzen
-          }
-          finally {
-            if ($session) { Remove-PSSession $session }
-          }
-
-            # Sicherer Start: nur Zusammenfassung protokollieren
-            $summary = [PSCustomObject]@{
-              ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
-              TargetHost    = $hostName
-              UsersCount    = @($data.Users).Count
-              GroupsCount   = @($data.Groups).Count
-              SourceDC      = $data.SourceDC
-              ExportedAtUtc = $data.ExportedAtUtc
-            }
-
-            $summary | ConvertTo-Json -Depth 5 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
-            Write-Host "Dry-run summary created: artifacts\import-summary.json"
-
-            # HIER später echte Create/Update-Logik ergänzen
           }
           finally {
             if ($session) { Remove-PSSession $session }
