@@ -4,148 +4,234 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "export oder import"
+        description: "Choose run mode"
         required: true
-        default: "export"
         type: choice
         options:
           - export
           - import
       export_run_id:
-        description: "Nur für import: Run-ID des vorherigen Export-Runs"
+        description: "Run ID of successful export (required for import)"
         required: false
-        default: ""
-      source_domain_dn:
-        description: "z.B. DC=ProjektDrees,DC=local"
-        required: true
-        default: "DC=ProjektDrees,DC=local"
-      target_domain_dn:
-        description: "z.B. DC=PROJEKTDREES,DC=local"
-        required: true
-        default: "DC=PROJEKTDREES,DC=local"
-      base_ou_name:
-        description: "z.B. Projektdaten"
-        required: true
-        default: "Projektdaten"
+        type: string
 
 jobs:
   export:
+    if: ${{ inputs.mode == 'export' }}
     runs-on: [self-hosted, Windows, X64, mgmt01]
     defaults:
       run:
         shell: powershell
+    env:
+      SRC_AD_HOST: ${{ secrets.SRC_AD_HOST }}
+      SRC_AD_USER: ${{ secrets.SRC_AD_USER }}
+      SRC_AD_PASS: ${{ secrets.SRC_AD_PASS }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare local artifact dir
-        shell: powershell
+      - name: Prepare artifacts folder
         run: |
           New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
 
-      # -------------------------
-      # EXPORT
-      # -------------------------
-      - name: Export AD objects from source
-        if: ${{ github.event.inputs.mode == 'export' }}
-        shell: powershell
-        env:
-          SRC_AD_HOST: ${{ secrets.SRC_AD_HOST }}
-          SRC_AD_USER: ${{ secrets.SRC_AD_USER }}
-          SRC_AD_PASSWORD: ${{ secrets.SRC_AD_PASSWORD }}
+      - name: Preflight source AD connectivity
         run: |
           $ErrorActionPreference = "Stop"
 
-          $sec  = ConvertTo-SecureString $env:SRC_AD_PASSWORD -AsPlainText -Force
-          $cred = New-Object pscredential($env:SRC_AD_USER, $sec)
+          $required = @("SRC_AD_HOST","SRC_AD_USER","SRC_AD_PASS")
+          foreach ($k in $required) {
+            $val = (Get-Item "Env:$k" -ErrorAction SilentlyContinue).Value
+            if ([string]::IsNullOrWhiteSpace($val)) {
+              throw "Missing required secret: $k"
+            }
+          }
 
-          $session = New-PSSession -ComputerName $env:SRC_AD_HOST -Credential $cred
+          $hostName = $env:SRC_AD_HOST.Trim()
+          $userName = $env:SRC_AD_USER.Trim()
+
+          Write-Host "SRC_AD_HOST: $hostName"
+          Write-Host "SRC_AD_USER: $userName"
+
+          if ($userName -notmatch '\\' -and $userName -notmatch '@') {
+            throw "SRC_AD_USER must be DOMAIN\user or user@domain.tld"
+          }
+
           try {
-            $remoteRoot = "C:\Temp\ad-migration"
-            $remoteOut  = "$remoteRoot\out"
+            Resolve-DnsName -Name $hostName -ErrorAction Stop | Out-Null
+            Write-Host "DNS resolution OK"
+          } catch {
+            throw "DNS failed for '$hostName'. Prefer FQDN. Error: $($_.Exception.Message)"
+          }
 
-            Invoke-Command -Session $session -ScriptBlock {
-              param($rRoot, $rOut)
-              New-Item -ItemType Directory -Force -Path $rRoot | Out-Null
-              New-Item -ItemType Directory -Force -Path $rOut  | Out-Null
-            } -ArgumentList $remoteRoot, $remoteOut
+          try {
+            Test-WSMan -ComputerName $hostName -ErrorAction Stop | Out-Null
+            Write-Host "WinRM reachable"
+          } catch {
+            throw "Test-WSMan failed for '$hostName'. Error: $($_.Exception.Message)"
+          }
 
-            Copy-Item -ToSession $session -Path ".\scripts\ad-export.ps1" -Destination "$remoteRoot\ad-export.ps1" -Force
+      - name: Export AD objects from source
+        run: |
+          $ErrorActionPreference = "Stop"
 
-            Invoke-Command -Session $session -ScriptBlock {
-              param($rRoot, $srcDn, $ouName, $rOut)
-              & "$rRoot\ad-export.ps1" -SourceDomainDN $srcDn -BaseOuName $ouName -OutDir $rOut
-            } -ArgumentList $remoteRoot, "${{ github.event.inputs.source_domain_dn }}", "${{ github.event.inputs.base_ou_name }}", $remoteOut
+          $hostName = $env:SRC_AD_HOST.Trim()
+          $secure   = ConvertTo-SecureString $env:SRC_AD_PASS -AsPlainText -Force
+          $cred     = New-Object System.Management.Automation.PSCredential($env:SRC_AD_USER, $secure)
 
-            Copy-Item -FromSession $session -Path "$remoteOut\*.csv" -Destination ".\artifacts\" -Force
+          $session = $null
+          try {
+            try {
+              $session = New-PSSession -ComputerName $hostName -Authentication Kerberos -Credential $cred -ErrorAction Stop
+              Write-Host "Connected via Kerberos"
+            } catch {
+              Write-Warning "Kerberos failed: $($_.Exception.Message)"
+              Write-Warning "Trying Negotiate..."
+              $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
+              Write-Host "Connected via Negotiate"
+            }
+
+            $exportData = Invoke-Command -Session $session -ScriptBlock {
+              Import-Module ActiveDirectory -ErrorAction Stop
+
+              # Beispiel: Users + Groups exportieren (anpassbar)
+              $users = Get-ADUser -Filter * -Properties SamAccountName,UserPrincipalName,Enabled,DisplayName,GivenName,Surname,Mail,DistinguishedName |
+                Select-Object SamAccountName,UserPrincipalName,Enabled,DisplayName,GivenName,Surname,Mail,DistinguishedName
+
+              $groups = Get-ADGroup -Filter * -Properties SamAccountName,GroupCategory,GroupScope,DistinguishedName |
+                Select-Object SamAccountName,GroupCategory,GroupScope,DistinguishedName
+
+              [PSCustomObject]@{
+                ExportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+                SourceDC      = $env:COMPUTERNAME
+                Users         = $users
+                Groups        = $groups
+              }
+            }
+
+            $jsonPath = ".\artifacts\ad-export.json"
+            $exportData | ConvertTo-Json -Depth 8 | Out-File -FilePath $jsonPath -Encoding UTF8
+
+            Write-Host "Export written to $jsonPath"
+            Get-Item $jsonPath | Format-List FullName,Length,LastWriteTime
           }
           finally {
             if ($session) { Remove-PSSession $session }
           }
 
-      - name: Upload export artifacts
-        if: ${{ github.event.inputs.mode == 'export' }}
+      - name: Upload export artifact
         uses: actions/upload-artifact@v4
         with:
           name: ad-export
-          path: artifacts/*.csv
+          path: artifacts/ad-export.json
           if-no-files-found: error
-          retention-days: 7
 
-      # -------------------------
-      # IMPORT
-      # -------------------------
-      - name: Validate import input
-        if: ${{ github.event.inputs.mode == 'import' }}
+  import:
+    if: ${{ inputs.mode == 'import' }}
+    runs-on: [self-hosted, Windows, X64, mgmt01]
+    defaults:
+      run:
         shell: powershell
+    env:
+      TGT_AD_HOST: ${{ secrets.TGT_AD_HOST }}
+      TGT_AD_USER: ${{ secrets.TGT_AD_USER }}
+      TGT_AD_PASS: ${{ secrets.TGT_AD_PASS }}
+
+    steps:
+      - name: Validate import input
         run: |
-          if ([string]::IsNullOrWhiteSpace("${{ github.event.inputs.export_run_id }}")) {
-            throw "Für mode=import muss export_run_id gesetzt sein."
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.export_run_id }}")) {
+            throw "For import mode, export_run_id is required."
           }
 
-      - name: Download export artifacts from selected run
-        if: ${{ github.event.inputs.mode == 'import' }}
-        uses: actions/download-artifact@v4
+      - name: Download export artifact from run id
+        uses: dawidd6/action-download-artifact@v6
         with:
+          run_id: ${{ inputs.export_run_id }}
+          workflow: ad-migration.yml
           name: ad-export
-          run-id: ${{ github.event.inputs.export_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Import AD objects to target
-        if: ${{ github.event.inputs.mode == 'import' }}
-        shell: powershell
-        env:
-          DST_AD_HOST: ${{ secrets.DST_AD_HOST }}
-          DST_AD_USER: ${{ secrets.DST_AD_USER }}
-          DST_AD_PASSWORD: ${{ secrets.DST_AD_PASSWORD }}
-          DEFAULT_USER_PASSWORD: ${{ secrets.DEFAULT_USER_PASSWORD }}
+      - name: Verify artifact
+        run: |
+          $ErrorActionPreference = "Stop"
+          $file = "artifacts\ad-export.json"
+          if (!(Test-Path $file)) { throw "Artifact not found: $file" }
+          Get-Item $file | Format-List FullName,Length,LastWriteTime
+
+      - name: Preflight target AD connectivity
         run: |
           $ErrorActionPreference = "Stop"
 
-          $sec  = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
-          $cred = New-Object pscredential($env:DST_AD_USER, $sec)
-          $defaultPw = $env:DEFAULT_USER_PASSWORD
+          $required = @("TGT_AD_HOST","TGT_AD_USER","TGT_AD_PASS")
+          foreach ($k in $required) {
+            $val = (Get-Item "Env:$k" -ErrorAction SilentlyContinue).Value
+            if ([string]::IsNullOrWhiteSpace($val)) {
+              throw "Missing required secret: $k"
+            }
+          }
 
-          $session = New-PSSession -ComputerName $env:DST_AD_HOST -Credential $cred
+          $hostName = $env:TGT_AD_HOST.Trim()
+          $userName = $env:TGT_AD_USER.Trim()
+
+          Write-Host "TGT_AD_HOST: $hostName"
+          Write-Host "TGT_AD_USER: $userName"
+
+          if ($userName -notmatch '\\' -and $userName -notmatch '@') {
+            throw "TGT_AD_USER must be DOMAIN\user or user@domain.tld"
+          }
+
+          Resolve-DnsName -Name $hostName -ErrorAction Stop | Out-Null
+          Test-WSMan -ComputerName $hostName -ErrorAction Stop | Out-Null
+          Write-Host "Target DNS + WinRM OK"
+
+      - name: Import AD objects to target (dry-run log)
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $file = "artifacts\ad-export.json"
+          $data = Get-Content $file -Raw | ConvertFrom-Json
+
+          $hostName = $env:TGT_AD_HOST.Trim()
+          $secure   = ConvertTo-SecureString $env:TGT_AD_PASS -AsPlainText -Force
+          $cred     = New-Object System.Management.Automation.PSCredential($env:TGT_AD_USER, $secure)
+
+          $session = $null
           try {
-            $remoteRoot = "C:\Temp\ad-migration"
-            $remoteIn   = "$remoteRoot\in"
+            try {
+              $session = New-PSSession -ComputerName $hostName -Authentication Kerberos -Credential $cred -ErrorAction Stop
+              Write-Host "Connected via Kerberos"
+            } catch {
+              Write-Warning "Kerberos failed: $($_.Exception.Message)"
+              Write-Warning "Trying Negotiate..."
+              $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
+              Write-Host "Connected via Negotiate"
+            }
 
-            Invoke-Command -Session $session -ScriptBlock {
-              param($rRoot, $rIn)
-              New-Item -ItemType Directory -Force -Path $rRoot | Out-Null
-              New-Item -ItemType Directory -Force -Path $rIn   | Out-Null
-            } -ArgumentList $remoteRoot, $remoteIn
+            # Sicherer Start: nur Zusammenfassung protokollieren
+            $summary = [PSCustomObject]@{
+              ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+              TargetHost    = $hostName
+              UsersCount    = @($data.Users).Count
+              GroupsCount   = @($data.Groups).Count
+              SourceDC      = $data.SourceDC
+              ExportedAtUtc = $data.ExportedAtUtc
+            }
 
-            Copy-Item -ToSession $session -Path ".\scripts\ad-import.ps1" -Destination "$remoteRoot\ad-import.ps1" -Force
-            Copy-Item -ToSession $session -Path ".\artifacts\*.csv"       -Destination "$remoteIn\" -Force
+            $summary | ConvertTo-Json -Depth 5 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
+            Write-Host "Dry-run summary created: artifacts\import-summary.json"
 
-            Invoke-Command -Session $session -ScriptBlock {
-              param($rRoot, $tgtDn, $ouName, $rIn, $pw)
-              & "$rRoot\ad-import.ps1" -TargetDomainDN $tgtDn -BaseOuName $ouName -InDir $rIn -DefaultUserPassword $pw
-            } -ArgumentList $remoteRoot, "${{ github.event.inputs.target_domain_dn }}", "${{ github.event.inputs.base_ou_name }}", $remoteIn, $defaultPw
+            # HIER später echte Create/Update-Logik ergänzen
           }
           finally {
             if ($session) { Remove-PSSession $session }
           }
+
+      - name: Upload import summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ad-import-summary
+          path: artifacts/import-summary.json
+          if-no-files-found: error
