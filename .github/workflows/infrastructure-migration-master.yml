@@ -1,1 +1,485 @@
+name: Infrastructure Migration Master
 
+on:
+  workflow_dispatch:
+    inputs:
+      run_ad_import:
+        description: "Run AD import workflow"
+        required: true
+        type: choice
+        options: ["false", "true"]
+      ad_export_run_id:
+        description: "AD export run ID (required if run_ad_import=true)"
+        required: false
+        type: string
+
+      run_file_copy:
+        description: "Run file copy migration (robocopy)"
+        required: true
+        type: choice
+        options: ["false", "true"]
+      file_mode:
+        description: "dryrun/apply for file copy"
+        required: true
+        type: choice
+        options: ["dryrun", "apply"]
+      source_path:
+        description: "UNC source path (e.g. \\\\oldfs\\share)"
+        required: false
+        type: string
+      target_path:
+        description: "UNC target path (e.g. \\\\newfs\\share)"
+        required: false
+        type: string
+      mirror:
+        description: "Mirror target (/MIR) for file copy"
+        required: true
+        type: choice
+        options: ["false", "true"]
+
+      run_share_acl:
+        description: "Run share + ACL validation workflow"
+        required: true
+        type: choice
+        options: ["false", "true"]
+      share_mode:
+        description: "dryrun/apply for share migration"
+        required: true
+        type: choice
+        options: ["dryrun", "apply"]
+      source_server:
+        description: "Source fileserver hostname"
+        required: false
+        type: string
+      target_server:
+        description: "Target fileserver hostname"
+        required: false
+        type: string
+      share_names:
+        description: "Comma-separated share names"
+        required: false
+        type: string
+      validate_sample_size:
+        description: "ACL validation sample size per share"
+        required: false
+        type: string
+        default: "50"
+
+jobs:
+  validate-inputs:
+    runs-on: [self-hosted, Windows, X64, mgmt01]
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Validate selected inputs
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          function IsTrue([string]$v) { return $v -eq "true" }
+
+          $runAd = IsTrue("${{ inputs.run_ad_import }}")
+          $runFile = IsTrue("${{ inputs.run_file_copy }}")
+          $runShare = IsTrue("${{ inputs.run_share_acl }}")
+
+          if (-not $runAd -and -not $runFile -and -not $runShare) {
+            throw "Nothing selected. Set at least one of run_ad_import/run_file_copy/run_share_acl to true."
+          }
+
+          if ($runAd) {
+            if ([string]::IsNullOrWhiteSpace("${{ inputs.ad_export_run_id }}")) {
+              throw "ad_export_run_id is required when run_ad_import=true."
+            }
+          }
+
+          if ($runFile) {
+            if ([string]::IsNullOrWhiteSpace("${{ inputs.source_path }}")) { throw "source_path is required when run_file_copy=true." }
+            if ([string]::IsNullOrWhiteSpace("${{ inputs.target_path }}")) { throw "target_path is required when run_file_copy=true." }
+          }
+
+          if ($runShare) {
+            if ([string]::IsNullOrWhiteSpace("${{ inputs.source_server }}")) { throw "source_server is required when run_share_acl=true." }
+            if ([string]::IsNullOrWhiteSpace("${{ inputs.target_server }}")) { throw "target_server is required when run_share_acl=true." }
+            if ([string]::IsNullOrWhiteSpace("${{ inputs.share_names }}")) { throw "share_names is required when run_share_acl=true." }
+          }
+
+          Write-Host "Input validation OK"
+
+  ad-import:
+    needs: validate-inputs
+    if: ${{ inputs.run_ad_import == 'true' }}
+    runs-on: [self-hosted, Windows, X64, mgmt01]
+    defaults:
+      run:
+        shell: powershell
+    env:
+      DST_AD_HOST: ${{ secrets.DST_AD_HOST }}
+      DST_AD_USER: ${{ secrets.DST_AD_USER }}
+      DST_AD_PASSWORD: ${{ secrets.DST_AD_PASSWORD }}
+      AD_IMPORT_APPLY: ${{ secrets.AD_IMPORT_APPLY }}
+
+    steps:
+      - name: Download AD export artifact from run id
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ inputs.ad_export_run_id }}
+          workflow: ad-migration.yml
+          name: ad-export
+          path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify AD artifact
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (!(Test-Path "artifacts\ad-export.json")) { throw "Missing artifacts\ad-export.json" }
+          Get-Item "artifacts\ad-export.json" | Format-List FullName,Length,LastWriteTime
+
+      - name: AD Import (same logic as ad-migration import)
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $apply = ($env:AD_IMPORT_APPLY -eq "true")
+          Write-Host "AD APPLY MODE: $apply"
+
+          $file = "artifacts\ad-export.json"
+
+          Add-Type -AssemblyName System.Web.Extensions
+          $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+          $ser.MaxJsonLength = [int]::MaxValue
+          $data = $ser.DeserializeObject((Get-Content $file -Raw))
+
+          $hostName = $env:DST_AD_HOST.Trim()
+          $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
+          $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER.Trim(), $secure)
+
+          $session = $null
+          try {
+            $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
+
+            $result = Invoke-Command -Session $session -ArgumentList @($data, $apply) -ScriptBlock {
+              param($data, $apply)
+              Import-Module ActiveDirectory -ErrorAction Stop
+
+              $targetUserOu  = (Get-ADDomain).UsersContainer
+              $targetGroupOu = (Get-ADDomain).UsersContainer
+              $targetDns     = (Get-ADDomain).DNSRoot
+
+              $stats = [ordered]@{
+                UsersCreated       = 0
+                UsersUpdated       = 0
+                GroupsCreated      = 0
+                MembershipsAdded   = 0
+                MembershipsSkipped = 0
+                Warnings           = @()
+              }
+
+              function To-Bool($v) {
+                if ($null -eq $v) { return $false }
+                return [System.Convert]::ToBoolean($v)
+              }
+              function Get-DictValue($obj, $key) {
+                if ($null -eq $obj) { return $null }
+                if ($obj -is [System.Collections.IDictionary] -and $obj.Contains($key)) { return $obj[$key] }
+                return $null
+              }
+              function Normalize-GroupScope($raw) {
+                if ($raw -is [System.Collections.IDictionary]) {
+                  $candidate = Get-DictValue $raw "Value"
+                  if ([string]::IsNullOrWhiteSpace("$candidate")) { $candidate = Get-DictValue $raw "value" }
+                  if (-not [string]::IsNullOrWhiteSpace("$candidate")) { $raw = $candidate } else { $raw = Get-DictValue $raw "value" }
+                }
+                $s = "$raw"
+                switch -Regex ($s) {
+                  '^(DomainLocal|Global|Universal)$' { return $s }
+                  '^0$' { return "DomainLocal" }
+                  '^1$' { return "Global" }
+                  '^2$' { return "Universal" }
+                  default { return "Global" }
+                }
+              }
+              function Normalize-GroupCategory($raw) {
+                if ($raw -is [System.Collections.IDictionary]) {
+                  $candidate = Get-DictValue $raw "Value"
+                  if ([string]::IsNullOrWhiteSpace("$candidate")) { $candidate = Get-DictValue $raw "value" }
+                  if (-not [string]::IsNullOrWhiteSpace("$candidate")) { $raw = $candidate } else { $raw = Get-DictValue $raw "value" }
+                }
+                $s = "$raw"
+                switch -Regex ($s) {
+                  '^(Security|Distribution)$' { return $s }
+                  '^0$' { return "Distribution" }
+                  '^1$' { return "Security" }
+                  default { return "Security" }
+                }
+              }
+
+              foreach ($g in @($data["Groups"])) {
+                $sam = $g["SamAccountName"]
+                if ([string]::IsNullOrWhiteSpace($sam)) { continue }
+                $existing = Get-ADGroup -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue
+                if (-not $existing) {
+                  $scope = Normalize-GroupScope $g["GroupScope"]
+                  $cat = Normalize-GroupCategory $g["GroupCategory"]
+                  if ($apply) {
+                    New-ADGroup -Name $sam -SamAccountName $sam -GroupScope $scope -GroupCategory $cat -Path $targetGroupOu -ErrorAction Stop | Out-Null
+                  }
+                  $stats.GroupsCreated++
+                }
+              }
+
+              foreach ($u in @($data["Users"])) {
+                $sam = $u["SamAccountName"]
+                if ([string]::IsNullOrWhiteSpace($sam)) { continue }
+
+                $display = $u["DisplayName"]; $given = $u["GivenName"]; $surname = $u["Surname"]; $mail = $u["Mail"]
+                $upnIn = $u["UserPrincipalName"]; $enabled = To-Bool $u["Enabled"]
+
+                if (-not [string]::IsNullOrWhiteSpace($upnIn) -and $upnIn -like "*@*") { $upn = "$($upnIn.Split("@")[0])@$targetDns" } else { $upn = "$sam@$targetDns" }
+
+                $existing = Get-ADUser -Filter "SamAccountName -eq '$sam'" -Properties Enabled -ErrorAction SilentlyContinue
+                if (-not $existing) {
+                  $initPwd = ConvertTo-SecureString "ChangeMe!12345" -AsPlainText -Force
+                  if ($apply) {
+                    New-ADUser -Name ($(if ($display) { $display } else { $sam })) -SamAccountName $sam -UserPrincipalName $upn -DisplayName $display -GivenName $given -Surname $surname -EmailAddress $mail -Path $targetUserOu -AccountPassword $initPwd -Enabled:$enabled -ChangePasswordAtLogon $true -ErrorAction Stop
+                  }
+                  $stats.UsersCreated++
+                } else {
+                  if ($apply) {
+                    Set-ADUser -Identity $existing -UserPrincipalName $upn -DisplayName $display -GivenName $given -Surname $surname -EmailAddress $mail -ErrorAction Stop
+                    if ($enabled -and -not $existing.Enabled) { Enable-ADAccount -Identity $existing -ErrorAction Stop }
+                    if (-not $enabled -and $existing.Enabled) { Disable-ADAccount -Identity $existing -ErrorAction Stop }
+                  }
+                  $stats.UsersUpdated++
+                }
+              }
+
+              foreach ($m in @($data["Memberships"])) {
+                $groupSam = $m["GroupSamAccountName"]
+                if ([string]::IsNullOrWhiteSpace($groupSam)) { continue }
+
+                $group = Get-ADGroup -Filter "SamAccountName -eq '$groupSam'" -ErrorAction SilentlyContinue
+                if (-not $group) { $stats.MembershipsSkipped++; $stats.Warnings += "Group not found: $groupSam"; continue }
+
+                foreach ($memberSam in @($m["MemberSamAccountNames"])) {
+                  if ([string]::IsNullOrWhiteSpace($memberSam)) { continue }
+                  $user = Get-ADUser -Filter "SamAccountName -eq '$memberSam'" -ErrorAction SilentlyContinue
+                  if (-not $user) { $stats.MembershipsSkipped++; $stats.Warnings += "User not found: $memberSam in $groupSam"; continue }
+
+                  $already = (Get-ADGroupMember -Identity $group.DistinguishedName -Recursive:$false -ErrorAction SilentlyContinue | Where-Object { $_.DistinguishedName -eq $user.DistinguishedName } | Select-Object -First 1) -ne $null
+                  if (-not $already) {
+                    if ($apply) { Add-ADGroupMember -Identity $group.DistinguishedName -Members $user.DistinguishedName -ErrorAction Stop }
+                    $stats.MembershipsAdded++
+                  }
+                }
+              }
+
+              [PSCustomObject]$stats
+            }
+
+            $summary = [PSCustomObject]@{
+              ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+              TargetHost = $hostName
+              ApplyMode = $apply
+              SourceDC = $data["SourceDC"]
+              ExportedAtUtc = $data["ExportedAtUtc"]
+              UsersCount = @($data["Users"]).Count
+              GroupsCount = @($data["Groups"]).Count
+              MembershipsCount = @($data["Memberships"]).Count
+              Result = $result
+            }
+            New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+            $summary | ConvertTo-Json -Depth 10 | Out-File -FilePath ".\artifacts\ad-import-summary.json" -Encoding UTF8
+          }
+          finally {
+            if ($session) { Remove-PSSession $session }
+          }
+
+      - name: Upload AD import summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-ad-import-summary
+          path: artifacts/ad-import-summary.json
+          if-no-files-found: error
+
+  file-copy:
+    needs: validate-inputs
+    if: ${{ inputs.run_file_copy == 'true' }}
+    runs-on: [self-hosted, Windows, X64, mgmt01]
+    defaults:
+      run:
+        shell: powershell
+    env:
+      FILE_MIGRATION_APPLY: ${{ secrets.FILE_MIGRATION_APPLY }}
+    steps:
+      - name: Prepare artifacts folder
+        run: |
+          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+
+      - name: Preflight paths
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "${{ inputs.source_path }}"
+          $dst = "${{ inputs.target_path }}"
+          if (-not (Test-Path $src)) { throw "Source path not reachable: $src" }
+          if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
+          if (-not (Test-Path $dst)) { throw "Target path not reachable/creatable: $dst" }
+
+      - name: Robocopy
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "${{ inputs.source_path }}"
+          $dst = "${{ inputs.target_path }}"
+          $mode = "${{ inputs.file_mode }}"
+          $mirror = "${{ inputs.mirror }}"
+          $applySecret = ($env:FILE_MIGRATION_APPLY -eq "true")
+          $isApply = ($mode -eq "apply")
+          if ($isApply -and -not $applySecret) { throw "Apply requested, but FILE_MIGRATION_APPLY != true" }
+
+          $log = ".\artifacts\robocopy.log"
+          $opts = @("/E","/COPY:DATSOU","/DCOPY:DAT","/R:2","/W:2","/MT:16","/XJ","/FFT","/ZB","/TEE","/LOG:$log")
+          if ($mirror -eq "true") { $opts += "/MIR" }
+          if (-not $isApply) { $opts += "/L" }
+
+          & robocopy $src $dst @opts
+          $rc = $LASTEXITCODE
+          if ($rc -ge 8) { throw "Robocopy failed with code $rc" }
+
+          [PSCustomObject]@{
+            TimestampUtc = (Get-Date).ToUniversalTime().ToString("o")
+            SourcePath = $src
+            TargetPath = $dst
+            Mode = $mode
+            Mirror = ($mirror -eq "true")
+            ApplySecret = $applySecret
+            RobocopyExitCode = $rc
+          } | ConvertTo-Json -Depth 5 | Out-File .\artifacts\file-copy-summary.json -Encoding UTF8
+
+      - name: Upload file-copy artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-file-copy
+          path: |
+            artifacts/robocopy.log
+            artifacts/file-copy-summary.json
+          if-no-files-found: error
+
+  share-acl:
+    needs: validate-inputs
+    if: ${{ inputs.run_share_acl == 'true' }}
+    runs-on: [self-hosted, Windows, X64, mgmt01]
+    defaults:
+      run:
+        shell: powershell
+    env:
+      FILE_MIGRATION_APPLY: ${{ secrets.FILE_MIGRATION_APPLY }}
+    steps:
+      - name: Prepare artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+
+      - name: Share migration + ACL validation
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $mode = "${{ inputs.share_mode }}"
+          $srcServer = "${{ inputs.source_server }}".Trim()
+          $dstServer = "${{ inputs.target_server }}".Trim()
+          $sampleSizeRaw = "${{ inputs.validate_sample_size }}"
+          $applySecret = ($env:FILE_MIGRATION_APPLY -eq "true")
+          $isApply = ($mode -eq "apply")
+          if ($isApply -and -not $applySecret) { throw "Apply requested, but FILE_MIGRATION_APPLY != true" }
+
+          [int]$sampleSize = 50
+          if (-not [int]::TryParse($sampleSizeRaw, [ref]$sampleSize)) { throw "validate_sample_size must be integer" }
+          if ($sampleSize -lt 1) { $sampleSize = 1 }
+
+          $shares = "${{ inputs.share_names }}".Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          if ($shares.Count -eq 0) { throw "No share names provided." }
+
+          Test-WSMan -ComputerName $srcServer -ErrorAction Stop | Out-Null
+          Test-WSMan -ComputerName $dstServer -ErrorAction Stop | Out-Null
+
+          $report = @()
+
+          foreach ($share in $shares) {
+            $srcInfo = Invoke-Command -ComputerName $srcServer -ScriptBlock {
+              param($share)
+              Import-Module SmbShare -ErrorAction Stop
+              $s = Get-SmbShare -Name $share -ErrorAction Stop
+              $perms = Get-SmbShareAccess -Name $share -ErrorAction Stop | Select-Object Name,AccountName,AccessControlType,AccessRight
+              [PSCustomObject]@{ Name=$s.Name; Path=$s.Path; Description=$s.Description; Permissions=$perms }
+            } -ArgumentList $share
+
+            $dstLocalPath = Invoke-Command -ComputerName $dstServer -ScriptBlock {
+              param($share)
+              Import-Module SmbShare -ErrorAction Stop
+              $existing = Get-SmbShare -Name $share -ErrorAction SilentlyContinue
+              if ($existing) { return $existing.Path }
+              $root = "D:\Shares"
+              if (-not (Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+              $p = Join-Path $root $share
+              if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+              return $p
+            } -ArgumentList $share
+
+            if ($isApply) {
+              Invoke-Command -ComputerName $dstServer -ScriptBlock {
+                param($share,$path,$desc)
+                Import-Module SmbShare -ErrorAction Stop
+                $existing = Get-SmbShare -Name $share -ErrorAction SilentlyContinue
+                if (-not $existing) { New-SmbShare -Name $share -Path $path -Description $desc -ErrorAction Stop | Out-Null }
+              } -ArgumentList $share, $dstLocalPath, $srcInfo.Description
+
+              foreach ($p in $srcInfo.Permissions) {
+                if ($p.AccountName -match "^(BUILTIN\\Administrators|NT AUTHORITY\\SYSTEM)$") { continue }
+                Invoke-Command -ComputerName $dstServer -ScriptBlock {
+                  param($share,$acc,$act,$right)
+                  Import-Module SmbShare -ErrorAction Stop
+                  $exists = Get-SmbShareAccess -Name $share -ErrorAction SilentlyContinue | Where-Object {
+                    $_.AccountName -eq $acc -and $_.AccessControlType -eq $act -and $_.AccessRight -eq $right
+                  } | Select-Object -First 1
+                  if (-not $exists) { Grant-SmbShareAccess -Name $share -AccountName $acc -AccessRight $right -Force -ErrorAction Stop | Out-Null }
+                } -ArgumentList $share, $p.AccountName, $p.AccessControlType, $p.AccessRight
+              }
+            }
+
+            $srcShare = "\\$srcServer\$share"
+            $dstShare = "\\$dstServer\$share"
+            $sample = Get-ChildItem -Path $srcShare -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First $sampleSize -ExpandProperty FullName
+
+            $checked=0; $matches=0; $mismatches=0; $missing=0
+            foreach ($s in $sample) {
+              $rel = $s.Substring($srcShare.Length).TrimStart("\")
+              $d = Join-Path $dstShare $rel
+              if (-not (Test-Path $d)) { $missing++; continue }
+              $checked++
+
+              $a1 = (Get-Acl $s).Access | Select-Object IdentityReference,FileSystemRights,AccessControlType,InheritanceFlags,PropagationFlags | Sort-Object IdentityReference,FileSystemRights,AccessControlType,InheritanceFlags,PropagationFlags
+              $a2 = (Get-Acl $d).Access | Select-Object IdentityReference,FileSystemRights,AccessControlType,InheritanceFlags,PropagationFlags | Sort-Object IdentityReference,FileSystemRights,AccessControlType,InheritanceFlags,PropagationFlags
+              $diff = Compare-Object -ReferenceObject $a1 -DifferenceObject $a2 -Property IdentityReference,FileSystemRights,AccessControlType,InheritanceFlags,PropagationFlags
+              if ($null -eq $diff) { $matches++ } else { $mismatches++ }
+            }
+
+            $report += [PSCustomObject]@{
+              ShareName = $share
+              SourcePath = $srcInfo.Path
+              TargetPath = $dstLocalPath
+              Mode = $mode
+              SampleSize = $sampleSize
+              CheckedItems = $checked
+              AclMatches = $matches
+              AclMismatches = $mismatches
+              MissingTargets = $missing
+            }
+          }
+
+          $report | ConvertTo-Json -Depth 8 | Out-File .\artifacts\share-acl-report.json -Encoding UTF8
+          $report | Format-Table -AutoSize | Out-String | Out-File .\artifacts\share-acl-report.txt -Encoding UTF8
+
+      - name: Upload share-acl artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-share-acl
+          path: |
+            artifacts/share-acl-report.json
+            artifacts/share-acl-report.txt
+          if-no-files-found: error
