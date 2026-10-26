@@ -96,7 +96,7 @@ jobs:
                   Select-Object -ExpandProperty SamAccountName
 
                 [PSCustomObject]@{
-                  GroupSamAccountName = $g.SamAccountName
+                  GroupSamAccountName  = $g.SamAccountName
                   MemberSamAccountNames = @($members)
                 }
               }
@@ -242,6 +242,62 @@ jobs:
                 return [System.Convert]::ToBoolean($v)
               }
 
+              function Get-DictValue($obj, $key) {
+                if ($null -eq $obj) { return $null }
+                if ($obj -is [System.Collections.IDictionary]) {
+                  if ($obj.Contains($key)) { return $obj[$key] }
+                  return $null
+                }
+                return $null
+              }
+
+              function Normalize-GroupScope($raw) {
+                # raw kann String, Zahl oder Hashtable sein ({ value=1, Value="Global" })
+                if ($raw -is [System.Collections.IDictionary]) {
+                  $candidate = Get-DictValue $raw "Value"
+                  if ([string]::IsNullOrWhiteSpace("$candidate")) {
+                    $candidate = Get-DictValue $raw "value"
+                  }
+                  if (-not [string]::IsNullOrWhiteSpace("$candidate")) {
+                    $raw = $candidate
+                  } else {
+                    $raw = Get-DictValue $raw "value"
+                  }
+                }
+
+                $s = "$raw"
+                switch -Regex ($s) {
+                  '^(DomainLocal|Global|Universal)$' { return $s }
+                  '^0$' { return "DomainLocal" }
+                  '^1$' { return "Global" }
+                  '^2$' { return "Universal" }
+                  default { return "Global" }
+                }
+              }
+
+              function Normalize-GroupCategory($raw) {
+                # ADGroupCategory: 0=Distribution, 1=Security
+                if ($raw -is [System.Collections.IDictionary]) {
+                  $candidate = Get-DictValue $raw "Value"
+                  if ([string]::IsNullOrWhiteSpace("$candidate")) {
+                    $candidate = Get-DictValue $raw "value"
+                  }
+                  if (-not [string]::IsNullOrWhiteSpace("$candidate")) {
+                    $raw = $candidate
+                  } else {
+                    $raw = Get-DictValue $raw "value"
+                  }
+                }
+
+                $s = "$raw"
+                switch -Regex ($s) {
+                  '^(Security|Distribution)$' { return $s }
+                  '^0$' { return "Distribution" }
+                  '^1$' { return "Security" }
+                  default { return "Security" }
+                }
+              }
+
               # GROUPS
               $groups = @($data["Groups"])
               foreach ($g in $groups) {
@@ -250,10 +306,8 @@ jobs:
 
                 $existing = Get-ADGroup -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue
                 if (-not $existing) {
-                  $scope = "$($g["GroupScope"])"
-                  $cat   = "$($g["GroupCategory"])"
-                  if ([string]::IsNullOrWhiteSpace($scope)) { $scope = "Global" }
-                  if ([string]::IsNullOrWhiteSpace($cat))   { $cat = "Security" }
+                  $scope = Normalize-GroupScope $g["GroupScope"]
+                  $cat   = Normalize-GroupCategory $g["GroupCategory"]
 
                   if ($apply) {
                     New-ADGroup `
@@ -352,10 +406,9 @@ jobs:
 
                   $alreadyMember = $false
                   try {
-                    $alreadyMember = Get-ADGroupMember -Identity $group.DistinguishedName -Recursive:$false -ErrorAction Stop |
+                    $alreadyMember = (Get-ADGroupMember -Identity $group.DistinguishedName -Recursive:$false -ErrorAction Stop |
                       Where-Object { $_.DistinguishedName -eq $user.DistinguishedName } |
-                      ForEach-Object { $true } |
-                      Select-Object -First 1
+                      Select-Object -First 1) -ne $null
                   } catch {}
 
                   if (-not $alreadyMember) {
@@ -371,15 +424,15 @@ jobs:
             }
 
             $summary = [PSCustomObject]@{
-              ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
-              TargetHost    = $hostName
-              ApplyMode     = $apply
-              SourceDC      = $data["SourceDC"]
-              ExportedAtUtc = $data["ExportedAtUtc"]
-              UsersCount    = @($data["Users"]).Count
-              GroupsCount   = @($data["Groups"]).Count
+              ImportedAtUtc    = (Get-Date).ToUniversalTime().ToString("o")
+              TargetHost       = $hostName
+              ApplyMode        = $apply
+              SourceDC         = $data["SourceDC"]
+              ExportedAtUtc    = $data["ExportedAtUtc"]
+              UsersCount       = @($data["Users"]).Count
+              GroupsCount      = @($data["Groups"]).Count
               MembershipsCount = @($data["Memberships"]).Count
-              Result        = $result
+              Result           = $result
             }
 
             $summary | ConvertTo-Json -Depth 10 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
