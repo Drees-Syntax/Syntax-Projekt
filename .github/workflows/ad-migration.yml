@@ -187,8 +187,8 @@ jobs:
           Test-WSMan -ComputerName $hostName -ErrorAction Stop | Out-Null
           Write-Host "Target DNS + WinRM OK"
 
-      - name: Import AD objects to target (dry-run log)
-        run: |
+             - name: Import AD objects to target (dry-run log)
+            run: |
           $ErrorActionPreference = "Stop"
 
           $file = "artifacts\ad-export.json"
@@ -201,14 +201,31 @@ jobs:
           $session = $null
           try {
             try {
-              $session = New-PSSession -ComputerName $hostName -Authentication Kerberos -Credential $cred -ErrorAction Stop
-              Write-Host "Connected via Kerberos"
-            } catch {
-              Write-Warning "Kerberos failed: $($_.Exception.Message)"
-              Write-Warning "Trying Negotiate..."
+              # AWS/externes Ziel: Negotiate ist der stabile Pfad
               $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
               Write-Host "Connected via Negotiate"
+            } catch {
+              throw "WinRM session failed (Negotiate) to '$hostName' with user '$($env:DST_AD_USER)'. Error: $($_.Exception.Message)"
             }
+
+            # Sicherer Start: nur Zusammenfassung protokollieren
+            $summary = [PSCustomObject]@{
+              ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+              TargetHost    = $hostName
+              UsersCount    = @($data.Users).Count
+              GroupsCount   = @($data.Groups).Count
+              SourceDC      = $data.SourceDC
+              ExportedAtUtc = $data.ExportedAtUtc
+            }
+
+            $summary | ConvertTo-Json -Depth 5 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
+            Write-Host "Dry-run summary created: artifacts\import-summary.json"
+
+            # HIER später echte Create/Update-Logik ergänzen
+          }
+          finally {
+            if ($session) { Remove-PSSession $session }
+          }
 
             # Sicherer Start: nur Zusammenfassung protokollieren
             $summary = [PSCustomObject]@{
