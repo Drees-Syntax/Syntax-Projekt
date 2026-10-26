@@ -133,9 +133,9 @@ jobs:
       run:
         shell: powershell
     env:
-      TGT_AD_HOST: ${{ secrets.DST_AD_HOST }}
-      TGT_AD_USER: ${{ secrets.DST_AD_USER }}
-      TGT_AD_PASS: ${{ secrets.DST_AD_PASSWORD }}
+      DST_AD_HOST: ${{ secrets.DST_AD_HOST }}
+      DST_AD_USER: ${{ secrets.DST_AD_USER }}
+      DST_AD_PASSWORD: ${{ secrets.DST_AD_PASSWORD }}
 
     steps:
       - name: Validate import input
