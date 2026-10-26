@@ -29,14 +29,17 @@ on:
         default: "Projektdaten"
 
 jobs:
-  run:
-    runs-on: [self-hosted, windows, x64, mgmt01]
+  export:
+    runs-on: [self-hosted, Windows, X64, mgmt01]
+    defaults:
+      run:
+        shell: powershell
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Prepare local artifact dir
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
 
@@ -45,7 +48,7 @@ jobs:
       # -------------------------
       - name: Export AD objects from source
         if: ${{ github.event.inputs.mode == 'export' }}
-        shell: pwsh
+        shell: powershell
         env:
           SRC_AD_HOST: ${{ secrets.SRC_AD_HOST }}
           SRC_AD_USER: ${{ secrets.SRC_AD_USER }}
@@ -94,7 +97,7 @@ jobs:
       # -------------------------
       - name: Validate import input
         if: ${{ github.event.inputs.mode == 'import' }}
-        shell: pwsh
+        shell: powershell
         run: |
           if ([string]::IsNullOrWhiteSpace("${{ github.event.inputs.export_run_id }}")) {
             throw "Für mode=import muss export_run_id gesetzt sein."
@@ -111,7 +114,7 @@ jobs:
 
       - name: Import AD objects to target
         if: ${{ github.event.inputs.mode == 'import' }}
-        shell: pwsh
+        shell: powershell
         env:
           DST_AD_HOST: ${{ secrets.DST_AD_HOST }}
           DST_AD_USER: ${{ secrets.DST_AD_USER }}
