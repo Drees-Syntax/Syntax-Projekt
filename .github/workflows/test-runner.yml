@@ -5,7 +5,7 @@ on:
 
 jobs:
   hello:
-    runs-on: [self-hosted, Windows, mgmt X64]
+    runs-on: [self-hosted, Windows, mgmt, X64]
     
 
     steps:
