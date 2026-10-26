@@ -25,7 +25,7 @@ jobs:
     env:
       SRC_AD_HOST: ${{ secrets.SRC_AD_HOST }}
       SRC_AD_USER: ${{ secrets.SRC_AD_USER }}
-      SRC_AD_PASS: ${{ secrets.SRC_AD_PASS }}
+      SRC_AD_PASS: ${{ secrets.SRC_AD_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -133,9 +133,9 @@ jobs:
       run:
         shell: powershell
     env:
-      TGT_AD_HOST: ${{ secrets.TGT_AD_HOST }}
-      TGT_AD_USER: ${{ secrets.TGT_AD_USER }}
-      TGT_AD_PASS: ${{ secrets.TGT_AD_PASS }}
+      TGT_AD_HOST: ${{ secrets.DST_AD_HOST }}
+      TGT_AD_USER: ${{ secrets.DST_AD_USER }}
+      TGT_AD_PASS: ${{ secrets.DST_AD_PASSWORD }}
 
     steps:
       - name: Validate import input
@@ -165,7 +165,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $required = @("TGT_AD_HOST","TGT_AD_USER","TGT_AD_PASS")
+          $required = @("DST_AD_HOST","DST_AD_USER","DST_AD_PASSWORD")
           foreach ($k in $required) {
             $val = (Get-Item "Env:$k" -ErrorAction SilentlyContinue).Value
             if ([string]::IsNullOrWhiteSpace($val)) {
@@ -173,14 +173,14 @@ jobs:
             }
           }
 
-          $hostName = $env:TGT_AD_HOST.Trim()
-          $userName = $env:TGT_AD_USER.Trim()
+          $hostName = $env:DST_AD_HOST.Trim()
+          $userName = $env:DST_AD_USER.Trim()
 
-          Write-Host "TGT_AD_HOST: $hostName"
-          Write-Host "TGT_AD_USER: $userName"
+          Write-Host "DST_AD_HOST: $hostName"
+          Write-Host "DST_AD_USER: $userName"
 
           if ($userName -notmatch '\\' -and $userName -notmatch '@') {
-            throw "TGT_AD_USER must be DOMAIN\user or user@domain.tld"
+            throw "DST_AD_USER must be DOMAIN\user or user@domain.tld"
           }
 
           Resolve-DnsName -Name $hostName -ErrorAction Stop | Out-Null
@@ -194,9 +194,9 @@ jobs:
           $file = "artifacts\ad-export.json"
           $data = Get-Content $file -Raw | ConvertFrom-Json
 
-          $hostName = $env:TGT_AD_HOST.Trim()
-          $secure   = ConvertTo-SecureString $env:TGT_AD_PASS -AsPlainText -Force
-          $cred     = New-Object System.Management.Automation.PSCredential($env:TGT_AD_USER, $secure)
+          $hostName = $env:DST_AD_HOST.Trim()
+          $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
+          $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER, $secure)
 
           $session = $null
           try {
