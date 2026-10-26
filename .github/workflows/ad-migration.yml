@@ -181,40 +181,40 @@ jobs:
           }
           Write-Host "WinRM port 5985 OK"
 
-          - name: Import AD objects to target (dry-run log)
-            run: |
-             $ErrorActionPreference = "Stop"
+      - name: Import AD objects to target (dry-run log)
+        run: |
+           $ErrorActionPreference = "Stop"
 
-             $file = "artifacts\ad-export.json"
+           $file = "artifacts\ad-export.json"
 
-             Add-Type -AssemblyName System.Web.Extensions
-             $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-             $ser.MaxJsonLength = [int]::MaxValue
-             $data = $ser.DeserializeObject((Get-Content $file -Raw))
+           Add-Type -AssemblyName System.Web.Extensions
+           $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+           $ser.MaxJsonLength = [int]::MaxValue
+           $data = $ser.DeserializeObject((Get-Content $file -Raw))
 
-             $hostName = $env:DST_AD_HOST.Trim()
-             $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
-             $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER.Trim(), $secure)
+           $hostName = $env:DST_AD_HOST.Trim()
+           $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
+           $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER.Trim(), $secure)
 
-             $session = $null
-             try {
-             $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
-             Write-Host "Connected via Negotiate"
+           $session = $null
+           try {
+            $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
+            Write-Host "Connected via Negotiate"
 
-             $summary = [PSCustomObject]@{
-               ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
-               TargetHost    = $hostName
-               UsersCount    = @($data["Users"]).Count
-               GroupsCount   = @($data["Groups"]).Count
-               SourceDC      = $data["SourceDC"]
-               ExportedAtUtc = $data["ExportedAtUtc"]
+            $summary = [PSCustomObject]@{
+              ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+              TargetHost    = $hostName
+              UsersCount    = @($data["Users"]).Count
+              GroupsCount   = @($data["Groups"]).Count
+              SourceDC      = $data["SourceDC"]
+              ExportedAtUtc = $data["ExportedAtUtc"]
             }
 
             $summary | ConvertTo-Json -Depth 5 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
             Write-Host "Dry-run summary created: artifacts\import-summary.json"
             }
             finally {
-            if ($session) { Remove-PSSession $session }
+              if ($session) { Remove-PSSession $session }
             }
 
       - name: Upload import summary
