@@ -90,16 +90,28 @@ jobs:
               $groups = Get-ADGroup -Filter * -Properties SamAccountName,GroupCategory,GroupScope,DistinguishedName |
                 Select-Object SamAccountName,GroupCategory,GroupScope,DistinguishedName
 
+              $memberships = foreach ($g in $groups) {
+                $members = Get-ADGroupMember -Identity $g.DistinguishedName -Recursive:$false -ErrorAction SilentlyContinue |
+                  Where-Object { $_.objectClass -eq "user" } |
+                  Select-Object -ExpandProperty SamAccountName
+
+                [PSCustomObject]@{
+                  GroupSamAccountName = $g.SamAccountName
+                  MemberSamAccountNames = @($members)
+                }
+              }
+
               [PSCustomObject]@{
                 ExportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
                 SourceDC      = $env:COMPUTERNAME
-                Users         = $users
-                Groups        = $groups
+                Users         = @($users)
+                Groups        = @($groups)
+                Memberships   = @($memberships)
               }
             }
 
             $jsonPath = ".\artifacts\ad-export.json"
-            $exportData | ConvertTo-Json -Depth 8 | Out-File -FilePath $jsonPath -Encoding UTF8
+            $exportData | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonPath -Encoding UTF8
 
             Write-Host "Export written to $jsonPath"
             Get-Item $jsonPath | Format-List FullName,Length,LastWriteTime
@@ -125,6 +137,7 @@ jobs:
       DST_AD_HOST: ${{ secrets.DST_AD_HOST }}
       DST_AD_USER: ${{ secrets.DST_AD_USER }}
       DST_AD_PASSWORD: ${{ secrets.DST_AD_PASSWORD }}
+      AD_IMPORT_APPLY: ${{ secrets.AD_IMPORT_APPLY }}
 
     steps:
       - name: Validate import input
@@ -181,41 +194,200 @@ jobs:
           }
           Write-Host "WinRM port 5985 OK"
 
-      - name: Import AD objects to target (dry-run log)
+      - name: Import AD objects to target
         run: |
-           $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Stop"
 
-           $file = "artifacts\ad-export.json"
+          # Safety switch: default = simulation
+          # Set secret AD_IMPORT_APPLY=true for real writes
+          $apply = ($env:AD_IMPORT_APPLY -eq "true")
+          Write-Host "APPLY MODE: $apply"
 
-           Add-Type -AssemblyName System.Web.Extensions
-           $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-           $ser.MaxJsonLength = [int]::MaxValue
-           $data = $ser.DeserializeObject((Get-Content $file -Raw))
+          $file = "artifacts\ad-export.json"
 
-           $hostName = $env:DST_AD_HOST.Trim()
-           $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
-           $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER.Trim(), $secure)
+          Add-Type -AssemblyName System.Web.Extensions
+          $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+          $ser.MaxJsonLength = [int]::MaxValue
+          $data = $ser.DeserializeObject((Get-Content $file -Raw))
 
-           $session = $null
-           try {
+          $hostName = $env:DST_AD_HOST.Trim()
+          $secure   = ConvertTo-SecureString $env:DST_AD_PASSWORD -AsPlainText -Force
+          $cred     = New-Object System.Management.Automation.PSCredential($env:DST_AD_USER.Trim(), $secure)
+
+          $session = $null
+          try {
             $session = New-PSSession -ComputerName $hostName -Authentication Negotiate -Credential $cred -ErrorAction Stop
             Write-Host "Connected via Negotiate"
+
+            $result = Invoke-Command -Session $session -ArgumentList @($data, $apply) -ScriptBlock {
+              param($data, $apply)
+
+              Import-Module ActiveDirectory -ErrorAction Stop
+
+              $targetUserOu  = (Get-ADDomain).UsersContainer
+              $targetGroupOu = (Get-ADDomain).UsersContainer
+              $targetDns     = (Get-ADDomain).DNSRoot
+
+              $stats = [ordered]@{
+                UsersCreated       = 0
+                UsersUpdated       = 0
+                GroupsCreated      = 0
+                MembershipsAdded   = 0
+                MembershipsSkipped = 0
+                Warnings           = @()
+              }
+
+              function To-Bool($v) {
+                if ($null -eq $v) { return $false }
+                return [System.Convert]::ToBoolean($v)
+              }
+
+              # GROUPS
+              $groups = @($data["Groups"])
+              foreach ($g in $groups) {
+                $sam = $g["SamAccountName"]
+                if ([string]::IsNullOrWhiteSpace($sam)) { continue }
+
+                $existing = Get-ADGroup -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue
+                if (-not $existing) {
+                  $scope = "$($g["GroupScope"])"
+                  $cat   = "$($g["GroupCategory"])"
+                  if ([string]::IsNullOrWhiteSpace($scope)) { $scope = "Global" }
+                  if ([string]::IsNullOrWhiteSpace($cat))   { $cat = "Security" }
+
+                  if ($apply) {
+                    New-ADGroup `
+                      -Name $sam `
+                      -SamAccountName $sam `
+                      -GroupScope $scope `
+                      -GroupCategory $cat `
+                      -Path $targetGroupOu `
+                      -ErrorAction Stop | Out-Null
+                  }
+                  $stats.GroupsCreated++
+                }
+              }
+
+              # USERS
+              $users = @($data["Users"])
+              foreach ($u in $users) {
+                $sam = $u["SamAccountName"]
+                if ([string]::IsNullOrWhiteSpace($sam)) { continue }
+
+                $display = $u["DisplayName"]
+                $given   = $u["GivenName"]
+                $surname = $u["Surname"]
+                $mail    = $u["Mail"]
+                $upnIn   = $u["UserPrincipalName"]
+                $enabled = To-Bool $u["Enabled"]
+
+                if (-not [string]::IsNullOrWhiteSpace($upnIn) -and $upnIn -like "*@*") {
+                  $prefix = $upnIn.Split("@")[0]
+                  $upn = "$prefix@$targetDns"
+                } else {
+                  $upn = "$sam@$targetDns"
+                }
+
+                $existing = Get-ADUser -Filter "SamAccountName -eq '$sam'" -Properties Enabled -ErrorAction SilentlyContinue
+                if (-not $existing) {
+                  $initPwd = ConvertTo-SecureString "ChangeMe!12345" -AsPlainText -Force
+
+                  if ($apply) {
+                    New-ADUser `
+                      -Name ($(if ($display) { $display } else { $sam })) `
+                      -SamAccountName $sam `
+                      -UserPrincipalName $upn `
+                      -DisplayName $display `
+                      -GivenName $given `
+                      -Surname $surname `
+                      -EmailAddress $mail `
+                      -Path $targetUserOu `
+                      -AccountPassword $initPwd `
+                      -Enabled:$enabled `
+                      -ChangePasswordAtLogon $true `
+                      -ErrorAction Stop
+                  }
+                  $stats.UsersCreated++
+                }
+                else {
+                  if ($apply) {
+                    Set-ADUser -Identity $existing `
+                      -UserPrincipalName $upn `
+                      -DisplayName $display `
+                      -GivenName $given `
+                      -Surname $surname `
+                      -EmailAddress $mail `
+                      -ErrorAction Stop
+
+                    if ($enabled -and -not $existing.Enabled) { Enable-ADAccount -Identity $existing -ErrorAction Stop }
+                    if (-not $enabled -and $existing.Enabled) { Disable-ADAccount -Identity $existing -ErrorAction Stop }
+                  }
+                  $stats.UsersUpdated++
+                }
+              }
+
+              # MEMBERSHIPS
+              $memberships = @($data["Memberships"])
+              foreach ($m in $memberships) {
+                $groupSam = $m["GroupSamAccountName"]
+                if ([string]::IsNullOrWhiteSpace($groupSam)) { continue }
+
+                $group = Get-ADGroup -Filter "SamAccountName -eq '$groupSam'" -ErrorAction SilentlyContinue
+                if (-not $group) {
+                  $stats.MembershipsSkipped++
+                  $stats.Warnings += "Group not found in target: $groupSam"
+                  continue
+                }
+
+                $memberSams = @($m["MemberSamAccountNames"])
+                foreach ($memberSam in $memberSams) {
+                  if ([string]::IsNullOrWhiteSpace($memberSam)) { continue }
+
+                  $user = Get-ADUser -Filter "SamAccountName -eq '$memberSam'" -ErrorAction SilentlyContinue
+                  if (-not $user) {
+                    $stats.MembershipsSkipped++
+                    $stats.Warnings += "User not found for membership: $memberSam (group $groupSam)"
+                    continue
+                  }
+
+                  $alreadyMember = $false
+                  try {
+                    $alreadyMember = Get-ADGroupMember -Identity $group.DistinguishedName -Recursive:$false -ErrorAction Stop |
+                      Where-Object { $_.DistinguishedName -eq $user.DistinguishedName } |
+                      ForEach-Object { $true } |
+                      Select-Object -First 1
+                  } catch {}
+
+                  if (-not $alreadyMember) {
+                    if ($apply) {
+                      Add-ADGroupMember -Identity $group.DistinguishedName -Members $user.DistinguishedName -ErrorAction Stop
+                    }
+                    $stats.MembershipsAdded++
+                  }
+                }
+              }
+
+              [PSCustomObject]$stats
+            }
 
             $summary = [PSCustomObject]@{
               ImportedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
               TargetHost    = $hostName
-              UsersCount    = @($data["Users"]).Count
-              GroupsCount   = @($data["Groups"]).Count
+              ApplyMode     = $apply
               SourceDC      = $data["SourceDC"]
               ExportedAtUtc = $data["ExportedAtUtc"]
+              UsersCount    = @($data["Users"]).Count
+              GroupsCount   = @($data["Groups"]).Count
+              MembershipsCount = @($data["Memberships"]).Count
+              Result        = $result
             }
 
-            $summary | ConvertTo-Json -Depth 5 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
-            Write-Host "Dry-run summary created: artifacts\import-summary.json"
-            }
-            finally {
-              if ($session) { Remove-PSSession $session }
-            }
+            $summary | ConvertTo-Json -Depth 10 | Out-File -FilePath ".\artifacts\import-summary.json" -Encoding UTF8
+            Write-Host "Import summary created: artifacts\import-summary.json"
+          }
+          finally {
+            if ($session) { Remove-PSSession $session }
+          }
 
       - name: Upload import summary
         uses: actions/upload-artifact@v4
